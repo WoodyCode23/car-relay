@@ -18,14 +18,25 @@ that car: anything that can make HTTPS requests can be the "car".
   voltage, gear, and whether the engine is running and the car is moving.
 - A car that has said nothing for 15 minutes shows as unavailable, not as its last value.
 
-## What it will not do
+## You decide
+
+The car's screens are another dashboard for your house. This is tooling: what goes on them and what they may do
+is yours to configure. The defaults are careful, and everything below that is off can be turned on.
+
+| | Default | To change it |
+|---|---|---|
+| Unlocking a lock, disarming an alarm from the car | off | `allow_unlock: true` |
+| Your own actions on a tile (any service) | none | `services:` on the tile |
+| The car's position in Home Assistant | off | `accept_position: true` |
+| Two presses for doors, locks and your own actions | on | `confirm: false` on an action of your own |
+
+What stays fixed, because it is how the thing is built:
 
 - **The car never holds a Home Assistant token or password.** It pairs once and gets a token that only this
-  component understands.
-- **The car can never unlock a door.** There is no unlock action in the code, whatever you configure.
-- **Home Assistant cannot control the car.** The car only reports; nothing here sends it a command.
-- **No position.** The car's report has no location field, and one sent anyway is dropped.
-- **What the car says about itself decides nothing.** It is shown, never used to allow an action.
+  component understands, and that token reaches only the tiles you listed.
+- **Home Assistant does not command the car.** The car reports; nothing here sends it a command.
+- **What the car says about itself decides nothing.** Its readings and position are shown, never used to allow
+  an action or unlock the screen.
 
 ## Install
 
@@ -57,8 +68,29 @@ car_relay:
 
 - **`allowed_users`** are Home Assistant user ids (Settings, People, Users, pick a user, the id is at the bottom).
   Leave it empty and any Home Assistant user can approve a car, which the log warns about.
-- **Tile kinds and actions:** `cover` (open, close, stop), `lock` (lock), `light` and `switch` (on, off),
-  `scene` (activate), `script` (run), `sensor` and `camera` (nothing to press).
+- **Tile kinds and actions:** `cover` (open, close, stop), `lock` (lock, and unlock with `allow_unlock`),
+  `light`, `switch`, `fan`, `input_boolean` (on, off), `button`, `input_button` (press), `scene` (activate),
+  `script` (run), `sensor` and `camera` (nothing to press), `custom` (only your own actions).
+- **Your own actions:** any tile can have `services:`, a list of named actions calling any Home Assistant
+  service. The tile's entity is the target unless you name one in `data`. Up to six per tile; the car shows the
+  first.
+
+  ```yaml
+      - id: movie
+        name: Movie night
+        entity: scene.movie
+        kind: custom
+        services:
+          start: { service: scene.turn_on, label: Start, confirm: false }
+      - id: front_door
+        name: Front door
+        entity: lock.front_door
+        kind: lock
+        actions: [lock, unlock]          # unlock is left out, with a log line, unless allow_unlock: true
+  ```
+
+- **Position:** with `accept_position: true`, a report carrying `lat`, `lon` (and optionally `accuracy_m`) becomes
+  `device_tracker.car_relay_car`, in your zones like a phone. Without it a position is dropped.
 - **Optional:** `scan_hours: { start: "23:00", end: "05:00" }` asks for a fresh scan during those hours;
   `live_cameras` gives moving pictures for a camera name; `alerts` is a list of further triggers shaped like
   `doorbell`; `max_devices` (1 to 4) is how many cars may be paired.
@@ -91,6 +123,7 @@ An automation cannot open the tiles: the component checks which Home Assistant u
 | `sensor.car_relay_speed_kmh`, `_rpm`, `_coolant_c`, `_oil_c`, `_battery_v`, `_gear`, `_stage`, `_condition` | what the car reports |
 | `binary_sensor.car_relay_engine`, `binary_sensor.car_relay_moving` | engine running, car moving |
 | `sensor.car_relay_car` | the same report in one entity's attributes (kept for older dashboards) |
+| `device_tracker.car_relay_car` | where the car is, only with `accept_position: true` and a car that sends it |
 
 The car reports only while its head unit is on and has a way to the internet (a phone's hotspot or a cable).
 

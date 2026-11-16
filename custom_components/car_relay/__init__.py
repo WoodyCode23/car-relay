@@ -17,6 +17,11 @@ configuration.yaml:
     live_cameras: { front_door: camera.front_door_live }   # optional: moving pictures for the same name
     doorbell: { trigger: binary_sensor.front_door_ding, to: "on", camera: front_door, label: Front door }
 
+An owner can go further, and it is their call: allow_unlock: true lets a lock tile offer "unlock" (and lets
+their own actions release a lock or disarm an alarm); a tile's services: {...} gives it actions of their own,
+any Home Assistant service; accept_position: true takes the car's position when it sends one. All three are
+off unless set.
+
 The other way round, the car may report how it is doing (speed, temperatures, engine running: views.py
 /car, core.py CAR_FIELDS). Each field shows up as sensor.car_relay_<field> or binary_sensor.car_relay_<field>.
 It is read-only in both senses: Home Assistant cannot ask the car to do anything, and what the car says
@@ -39,7 +44,7 @@ from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .core import CAR_STALE_S, Relay, car_entities, parse_hhmm
+from .core import CAR_STALE_S, Relay, car_entities, custom_actions, parse_hhmm
 from .views import async_register_views
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,12 +55,19 @@ PHONE_EVENT = "car_relay_phone"
 SESSION_ENTITY = "sensor.car_relay_session"
 
 # (tile kind, action) -> (domain, service, state the entity must be in, or None).
-# lock.unlock is deliberately absent: the car can never unlock a door.
+# ("lock", "unlock") is only kept on a tile when the configuration says allow_unlock: true (off by default).
 ACTIONS = {
     ("cover", "open"): ("cover", "open_cover", "closed"),
     ("cover", "close"): ("cover", "close_cover", "open"),
     ("cover", "stop"): ("cover", "stop_cover", None),
     ("lock", "lock"): ("lock", "lock", None),
+    ("lock", "unlock"): ("lock", "unlock", "locked"),
+    ("button", "press"): ("button", "press", None),
+    ("input_button", "press"): ("input_button", "press", None),
+    ("input_boolean", "on"): ("input_boolean", "turn_on", None),
+    ("input_boolean", "off"): ("input_boolean", "turn_off", None),
+    ("fan", "on"): ("fan", "turn_on", None),
+    ("fan", "off"): ("fan", "turn_off", None),
     ("light", "on"): ("light", "turn_on", None),
     ("light", "off"): ("light", "turn_off", None),
     ("switch", "on"): ("switch", "turn_on", None),
@@ -64,8 +76,9 @@ ACTIONS = {
     ("script", "run"): ("script", "turn_on", None),
     ("sensor", None): None,
 }
+GATED = {("lock", "unlock")}   # built-in actions that need allow_unlock
 # "camera" is a tile with nothing to press in the house: the car shows that camera when it is chosen.
-KINDS = sorted({k for k, _ in ACTIONS} | {"camera"})
+KINDS = sorted({k for k, _ in ACTIONS} | {"camera", "custom"})
 
 TILE = vol.Schema({
     vol.Required("id"): cv.slug,
@@ -75,6 +88,8 @@ TILE = vol.Schema({
     vol.Optional("actions", default=list): [cv.string],
     vol.Optional("camera"): cv.slug,   # kind camera: its name under cameras / live_cameras
     vol.Optional("info"): cv.entity_id,   # a line of text for the tile (and its picture): that entity's state
+    # the owner's own actions: {name: {service: "domain.service", data: {...}, label: "...", confirm: true}}
+    vol.Optional("services", default=dict): dict,
 })
 
 # The doorbell, and anything else that should pop the camera up in the car (motion, a person seen).
@@ -94,6 +109,8 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional("lock_after_minutes", default=10): vol.All(vol.Coerce(float), vol.Range(min=1, max=240)),
         vol.Optional("scan_hours"): vol.Schema({vol.Required("start"): cv.string, vol.Required("end"): cv.string}),
         vol.Optional("max_devices", default=1): vol.All(int, vol.Range(min=1, max=4)),
+        vol.Optional("allow_unlock", default=False): cv.boolean,      # unlock / disarm from the car: off unless set
+        vol.Optional("accept_position", default=False): cv.boolean,   # take the car's position when it sends one
         vol.Optional("qr_template", default="homeassistant://fire_event/" + SCAN_EVENT + "?c={code}"): cv.string,
         vol.Optional("tiles", default=list): [TILE],
         vol.Optional("cameras", default=dict): {cv.slug: cv.entity_id},
@@ -115,9 +132,15 @@ class Runtime:
         self.tiles = {t["id"]: t for t in conf["tiles"]}
         for t in self.tiles.values():
             bad = [a for a in t["actions"] if (t["kind"], a) not in ACTIONS]
+            gated = [a for a in t["actions"] if (t["kind"], a) in GATED and not conf["allow_unlock"]]
+            if gated:
+                _LOGGER.warning("tile %s: %s needs allow_unlock: true in the configuration, left out", t["id"], gated)
             if bad:
                 _LOGGER.warning("tile %s: dropping unsupported actions %s", t["id"], bad)
-                t["actions"] = [a for a in t["actions"] if a not in bad]
+            t["actions"] = [a for a in t["actions"] if a not in bad and a not in gated]
+            t["custom"], dropped = custom_actions(t.get("services"), conf["allow_unlock"])
+            for name, why in dropped:
+                _LOGGER.warning("tile %s: action %s left out (%s)", t["id"], name, why)
         self.cameras = conf["cameras"]
         self.live_cameras = conf["live_cameras"]   # same names: a camera whose MJPEG stream is worth sending
         self.seq = 1
@@ -184,6 +207,23 @@ class Runtime:
             clean, friendly_name="Car (reported by the head unit)", icon="mdi:car-sports"))
 
     @callback
+    def publish_position(self, pos):
+        """The car's position, when the owner asked for it (accept_position): a device tracker on the map."""
+        lat, lon, acc = pos
+        state = "not_home"
+        try:
+            from homeassistant.components.zone import async_active_zone   # late: zone may load after us
+            zone = async_active_zone(self.hass, lat, lon, acc or 0)
+            if zone is not None:
+                state = "home" if zone.entity_id == "zone.home" else zone.name
+        except Exception:  # noqa: BLE001 - no zones: the coordinates still show
+            pass
+        attrs = {"latitude": lat, "longitude": lon, "source_type": "gps", "friendly_name": "Car", "icon": "mdi:car"}
+        if acc is not None:
+            attrs["gps_accuracy"] = acc
+        self.hass.states.async_set("device_tracker.car_relay_car", state, attrs)
+
+    @callback
     def car_tick(self):
         """Called on the timer: a car that has said nothing for CAR_STALE_S is shown as unavailable."""
         if self.car_online and self.relay.now() - self.car_at > CAR_STALE_S:
@@ -208,6 +248,7 @@ class Runtime:
             "ok": state not in (STATE_UNAVAILABLE, STATE_UNKNOWN),
             "unit": (st.attributes.get("unit_of_measurement") if st else None) or "",
             "actions": t["actions"],
+            **({"custom": [{"action": k, "label": v["label"], "confirm": v["confirm"]} for k, v in t["custom"].items()]} if t.get("custom") else {}),
             **({"camera": t["camera"]} if t.get("camera") else {}),
             **({"info": self._info(t["info"])} if t.get("info") else {}),
         }

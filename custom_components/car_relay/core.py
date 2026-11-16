@@ -258,7 +258,7 @@ class Relay:
 # ---------------------------------------------------------------------------------------------
 # What the car reports about itself (POST /car). It comes from the car, so it is checked here and
 # is only ever shown: nothing the car says about itself may decide a lock, a pairing or an action.
-# There is no position in this list and none is accepted.
+# Where the car is, is a separate matter (clean_position below) and is off unless the owner turns it on.
 
 # key: (name, kind, low, high, unit, device class, icon)
 CAR_FIELDS = {
@@ -328,3 +328,84 @@ def car_entities(clean: dict, online: bool = True) -> list:
             state = clean[key]
         out.append((domain + ".car_relay_" + key, state, attrs))
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Where the car is. Off by default: a report's position is dropped unless the owner set
+# accept_position in the configuration. Then it is shown as a device tracker, and like the rest of
+# what a car says about itself it is only ever shown.
+
+def clean_position(data):
+    """(lat, lon, accuracy in metres or None) from a car report, or None when there is no usable position."""
+    if not isinstance(data, dict):
+        return None
+    lat, lon, acc = data.get("lat"), data.get("lon"), data.get("accuracy_m")
+
+    def real(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+    if not real(lat) or not real(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return None
+    if lat == 0 and lon == 0:
+        return None                     # a receiver with no fix reports the middle of the ocean
+    acc = round(float(acc), 1) if real(acc) and 0 <= acc <= 100000 else None
+    return round(float(lat), 6), round(float(lon), 6), acc
+
+
+# ---------------------------------------------------------------------------------------------
+# What a tile may do. Besides the built-in actions (the table in __init__.py), an owner can give a
+# tile actions of their own: a name, the Home Assistant service to call and the data to call it with.
+# That is their house and their call. Two things stay off unless they say so in the configuration
+# (allow_unlock): the built-in "unlock" of a lock tile, and a service of their own that releases a
+# lock or disarms an alarm directly.
+
+SENSITIVE_SERVICES = {"lock.unlock", "lock.open", "alarm_control_panel.alarm_disarm"}
+MAX_CUSTOM_ACTIONS = 6
+
+
+def service_parts(service):
+    """("light", "turn_on") from "light.turn_on", or None when it is not a service name."""
+    if not isinstance(service, str):
+        return None
+    parts = service.strip().lower().split(".")
+    if len(parts) != 2 or not all(p and all(ch.isalnum() or ch == "_" for ch in p) for p in parts):
+        return None
+    return parts[0], parts[1]
+
+
+def needs_unlock_permission(service) -> bool:
+    parts = service_parts(service)
+    return bool(parts) and ".".join(parts) in SENSITIVE_SERVICES
+
+
+def custom_actions(spec, allow_unlock: bool) -> dict:
+    """An owner's own actions for a tile, checked: {name: {"domain", "service", "data", "label", "confirm"}}.
+
+    Anything malformed is left out, and so is a lock release or alarm disarm without allow_unlock.
+    The second value returned lists what was left out and why, for the log."""
+    out, dropped = {}, []
+    if not isinstance(spec, dict):
+        return out, dropped
+    for name, a in list(spec.items())[:MAX_CUSTOM_ACTIONS * 4]:
+        key = str(name).strip().lower()
+        if not key or len(key) > 24 or not all(ch.isalnum() or ch == "_" for ch in key):
+            dropped.append((str(name)[:24], "not a usable name"))
+            continue
+        if not isinstance(a, dict):
+            dropped.append((key, "not an action"))
+            continue
+        parts = service_parts(a.get("service"))
+        if not parts:
+            dropped.append((key, "no service"))
+            continue
+        if needs_unlock_permission(a.get("service")) and not allow_unlock:
+            dropped.append((key, "needs allow_unlock"))
+            continue
+        if len(out) >= MAX_CUSTOM_ACTIONS:
+            dropped.append((key, "too many actions on one tile"))
+            continue
+        data = a.get("data") if isinstance(a.get("data"), dict) else {}
+        label = str(a.get("label") or key.replace("_", " ").capitalize())[:24]
+        out[key] = {"domain": parts[0], "service": parts[1], "data": dict(data), "label": label,
+                    "confirm": a.get("confirm") is not False}
+    return out, dropped

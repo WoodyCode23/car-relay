@@ -18,7 +18,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import Context, HomeAssistant
 
-from .core import clean_car
+from .core import clean_car, clean_position
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,12 +143,23 @@ class ActionView(_View):
             return _err(403, "locked")
         tile = rt.tiles.get(str(data.get("tile")))
         action = str(data.get("action"))
-        if not tile or action not in tile["actions"]:
+        if not tile:
             return _err(404, "no-such-action")
-        spec = self.actions.get((tile["kind"], action))
-        if not spec:
-            return _err(404, "no-such-action")
-        domain, service, need = spec
+        own = (tile.get("custom") or {}).get(action)
+        service_data = {"entity_id": tile["entity"]}
+        if own:
+            # the owner's own action: their service, their data; the tile's entity unless they named a target
+            domain, service, need = own["domain"], own["service"], None
+            service_data = dict(own["data"])
+            if not any(k in service_data for k in ("entity_id", "device_id", "area_id", "target")):
+                service_data["entity_id"] = tile["entity"]
+        else:
+            if action not in tile["actions"]:
+                return _err(404, "no-such-action")
+            spec = self.actions.get((tile["kind"], action))
+            if not spec:
+                return _err(404, "no-such-action")
+            domain, service, need = spec
         if not data.get("nonce"):
             return _err(400, "nonce-required")
         if not rt.relay.nonce(data.get("nonce")):
@@ -161,7 +172,7 @@ class ActionView(_View):
         _LOGGER.info("car_relay: %s.%s on %s", domain, service, tile["entity"])
         try:
             await hass.services.async_call(
-                domain, service, {"entity_id": tile["entity"]}, blocking=True, context=Context())
+                domain, service, service_data, blocking=True, context=Context())
         except Exception as err:  # noqa: BLE001 - whatever the integration raised, the car gets a clean answer
             _LOGGER.warning("car_relay: %s.%s failed: %s", domain, service, err)
             return _err(502, "action-failed")
@@ -181,6 +192,10 @@ class CarView(_View):
         clean = clean_car(data)
         # Informational only. This comes from the car, so never let it gate a security action.
         self.rt.publish_car(clean)
+        if self.rt.conf.get("accept_position"):
+            pos = clean_position(data)
+            if pos:
+                self.rt.publish_position(pos)
         return web.json_response({"ok": True})
 
 

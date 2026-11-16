@@ -229,6 +229,7 @@ class CarReport(unittest.TestCase):
             self.assertEqual(core.clean_car(junk), {})
 
     def test_no_position_field_exists(self):
+        # the readings never carry a position; where the car is has its own, switchable, path (clean_position)
         self.assertFalse(set(core.CAR_FIELDS) & {"lat", "lon", "latitude", "longitude", "gps", "position", "vin"})
         self.assertEqual(core.clean_car({"lat": 1.0, "longitude": 2.0, "position": "x", "vin": "X"}), {})
 
@@ -248,6 +249,54 @@ class CarReport(unittest.TestCase):
         ents = core.car_entities({}, online=False)
         self.assertEqual(len(ents), len(core.CAR_FIELDS))
         self.assertTrue(all(state == "unavailable" for _e, state, _a in ents))
+
+class Position(unittest.TestCase):
+    def test_a_real_position_is_kept(self):
+        self.assertEqual(core.clean_position({"lat": 40.1234567, "lon": -83.7654321, "accuracy_m": 12.34}), (40.123457, -83.765432, 12.3))
+        self.assertEqual(core.clean_position({"lat": -33, "lon": 151}), (-33.0, 151.0, None))
+
+    def test_anything_else_is_no_position(self):
+        for bad in (None, 5, {}, {"lat": 40}, {"lon": 3}, {"lat": "40", "lon": "3"}, {"lat": 91, "lon": 0}, {"lat": 0, "lon": 181},
+                    {"lat": float("nan"), "lon": 1}, {"lat": float("inf"), "lon": 1}, {"lat": True, "lon": False}, {"lat": 0, "lon": 0}):
+            self.assertIsNone(core.clean_position(bad), bad)
+        self.assertEqual(core.clean_position({"lat": 1, "lon": 1, "accuracy_m": -5})[2], None)
+
+
+class OwnActions(unittest.TestCase):
+    def test_an_owners_action_is_taken_as_written(self):
+        got, dropped = core.custom_actions({"Movie": {"service": "scene.turn_on", "data": {"entity_id": "scene.movie"}, "label": "Movie time"},
+                                            "vent": {"service": "cover.set_cover_position", "data": {"position": 20}, "confirm": False}}, False)
+        self.assertEqual(dropped, [])
+        self.assertEqual(got["movie"], {"domain": "scene", "service": "turn_on", "data": {"entity_id": "scene.movie"}, "label": "Movie time", "confirm": True})
+        self.assertEqual(got["vent"]["confirm"], False)
+        self.assertEqual(got["vent"]["label"], "Vent")
+
+    def test_releasing_a_lock_needs_the_owners_say_so(self):
+        spec = {"unlock": {"service": "lock.unlock"}, "open": {"service": "LOCK.Open"}, "disarm": {"service": "alarm_control_panel.alarm_disarm"},
+                "lock": {"service": "lock.lock"}}
+        got, dropped = core.custom_actions(spec, False)
+        self.assertEqual(sorted(got), ["lock"])
+        self.assertEqual(sorted(dropped), [("disarm", "needs allow_unlock"), ("open", "needs allow_unlock"), ("unlock", "needs allow_unlock")])
+        got, dropped = core.custom_actions(spec, True)
+        self.assertEqual(sorted(got), ["disarm", "lock", "open", "unlock"])
+        self.assertEqual(dropped, [])
+        self.assertTrue(core.needs_unlock_permission("lock.unlock"))
+        self.assertFalse(core.needs_unlock_permission("light.turn_on"))
+
+    def test_malformed_actions_are_left_out_not_guessed_at(self):
+        got, dropped = core.custom_actions({"": {"service": "a.b"}, "bad name!": {"service": "a.b"}, "x": "light.turn_on", "y": {"service": "no_dot"},
+                                            "z": {"service": "a.b.c"}, "w": {"service": 5}, "ok": {"service": "light.turn_on", "data": "nope"}}, True)
+        self.assertEqual(sorted(got), ["ok"])
+        self.assertEqual(got["ok"]["data"], {})
+        self.assertEqual(len(dropped), 6)
+        for junk in (None, [], "x", 5):
+            self.assertEqual(core.custom_actions(junk, True), ({}, []))
+
+    def test_a_tile_holds_a_handful_of_actions_at_most(self):
+        spec = {"a%d" % i: {"service": "script.turn_on"} for i in range(12)}
+        got, dropped = core.custom_actions(spec, False)
+        self.assertEqual(len(got), core.MAX_CUSTOM_ACTIONS)
+        self.assertEqual(len(dropped), 12 - core.MAX_CUSTOM_ACTIONS)
 
 
 if __name__ == "__main__":
