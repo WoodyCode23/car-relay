@@ -1,0 +1,40 @@
+open_pairing:
+  name: Open pairing window
+  description: Let a new car pair for a few minutes. Admin only.
+  fields:
+    minutes:
+      description: How long the window stays open.
+      example: 10
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 30
+unpair:
+  name: Unpair a car
+  description: Revoke a paired car's token. Admin only. With no device, lists the paired cars in the log.
+  fields:
+    device:
+      description: The device id shown in sensor.car_relay_session.
+      example: "a1b2c3d4e5f6"
+      selector:
+        text:
+scan:
+  name: Approve a car code
+  description: Same as scanning the QR code on the car. Only works when called by an allowed user.
+  fields:
+    code:
+      description: The code shown on the car's screen.
+      required: true
+      example: "K7M2XQ4R"
+      selector:
+        text:
+phone_connected:
+  name: Phone is in the car
+  description: Call from the phone's CarPlay-connected Shortcuts automation.
+phone_disconnected:
+  name: Phone left the car
+  description: Call from the phone's CarPlay-disconnected Shortcuts automation.
+lock:
+  name: Lock the car screen
+  description: Hard lock, a scan is needed to unlock.

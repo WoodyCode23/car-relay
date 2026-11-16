@@ -1,0 +1,12 @@
+{
+  "domain": "car_relay",
+  "name": "Car Relay",
+  "version": "0.5.0",
+  "documentation": "https://github.com/WoodyCode23/car-relay",
+  "issue_tracker": "https://github.com/WoodyCode23/car-relay/issues",
+  "dependencies": ["http"],
+  "after_dependencies": ["camera", "mobile_app"],
+  "codeowners": [],
+  "iot_class": "local_push",
+  "requirements": []
+}

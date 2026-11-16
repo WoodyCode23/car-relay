@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# not part of Car Relay: a separate local component kept in the same working folder
+custom_components/bambu_local/
